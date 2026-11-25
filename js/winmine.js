@@ -40,7 +40,7 @@ export class Minesweeper {
     this.ctx = canvas.getContext('2d');
     this.sprites = sprites;   // { color: {blocks, led, faces}, mono: {...} }
     this.prefs = prefs;
-    this.hooks = hooks;       // { sound(id), resized(w, h), won(level, time) }
+    this.hooks = hooks;       // { sound(id), resized(w, h), won(level, time) }; [fork] optional started(), over(win)
 
     this.board = new Uint8Array(27 * ROW);
     this.qx = new Int32Array(QUEUE_LEN);
@@ -63,6 +63,11 @@ export class Minesweeper {
     this.curX = -1;
     this.curY = -1;
     this.faceTracking = false;
+
+    // [fork] Shown sideways: the field drawn with its rows as columns (a wide field on a tall phone screen). Only the
+    // drawing and the mapping of clicks change; the board, its coordinates and the game are the same.
+    this.transposed = false;
+    this.flagsPlaced = 0;     // [fork] flags put down this game, for the page (a win without flags)
 
     // MSVCRT rand(), seeded with GetTickCount() like sub_1003ab0.
     this.seed = Date.now() & 0xffff;
@@ -122,12 +127,29 @@ export class Minesweeper {
     this.state = ST_PLAYING;
     this.tracking = false;
     this.faceTracking = false;
+    this.flagsPlaced = 0;     // [fork]
 
-    if (resized || this.canvas.width !== clientWidth(this.width)) {
-      this.canvas.width = clientWidth(this.width);
-      this.canvas.height = clientHeight(this.height);
+    // [fork] the client area follows the field as shown (sideways or not)
+    if (resized || this.canvas.width !== clientWidth(this.viewW) || this.canvas.height !== clientHeight(this.viewH)) {
+      this.canvas.width = clientWidth(this.viewW);
+      this.canvas.height = clientHeight(this.viewH);
       this.hooks.resized(this.canvas.width, this.canvas.height);
     }
+    this.paint();
+  }
+
+  // [fork] The field's size in squares as drawn: across and down.
+  get viewW() { return this.transposed ? this.height : this.width; }
+  get viewH() { return this.transposed ? this.width : this.height; }
+
+  // [fork] Show the field sideways (or not), keeping the game as it is.
+  setTransposed(on) {
+    if (this.transposed === !!on) return;
+    this.transposed = !!on;
+    if (!this.width) return;   // before the first game
+    this.canvas.width = clientWidth(this.viewW);
+    this.canvas.height = clientHeight(this.viewH);
+    this.hooks.resized(this.canvas.width, this.canvas.height);
     this.paint();
   }
 
@@ -268,6 +290,7 @@ export class Minesweeper {
     } else {
       next = BLK_FLAG;
       this.addMines(-1);
+      this.flagsPlaced++;   // [fork]
     }
     this.setSprite(x, y, next);
     if ((this.cell(x, y) & SPRITE) === BLK_FLAG && this.revealed === this.toReveal) this.gameOver(true);
@@ -306,6 +329,7 @@ export class Minesweeper {
     this.sound(win ? SOUND_WIN : SOUND_LOSE);
     this.state = ST_OVER;
     if (win) this.hooks.won(this.prefs.difficulty, this.timer);
+    this.hooks.over?.(win);   // [fork] every finished game, for the page's scores
   }
 
   // sub_1002fe0
@@ -384,6 +408,12 @@ export class Minesweeper {
     return [(px + 4) >> 4, (py - 39) >> 4];
   }
 
+  // [fork] The square under a client-area point, as the field is shown (sideways or not).
+  cellAt(px, py) {
+    const [x, y] = Minesweeper.cellAt(px, py);
+    return this.transposed ? [y, x] : [x, y];
+  }
+
   faceRect() {
     return [(this.canvas.width - 24) >> 1, 16, 24, 24];
   }
@@ -417,7 +447,7 @@ export class Minesweeper {
     } else if (leftHeld) {
       this.beginTracking(px, py);
     } else {
-      const [x, y] = Minesweeper.cellAt(px, py);
+      const [x, y] = this.cellAt(px, py);   // [fork] was Minesweeper.cellAt
       this.cycleMark(x, y);
     }
   }
@@ -443,7 +473,7 @@ export class Minesweeper {
     }
     if (!this.tracking) return;
     if (this.playing) {
-      const [x, y] = Minesweeper.cellAt(px, py);
+      const [x, y] = this.cellAt(px, py);   // [fork] was Minesweeper.cellAt
       this.trackTo(x, y);
     } else {
       this.trackTo(-2, -2);
@@ -481,6 +511,7 @@ export class Minesweeper {
         this.timerRunning = true;
         clearInterval(this.interval);   // SetTimer restarts the 1s period
         this.interval = setInterval(() => this.onTimer(), 1000);
+        this.hooks.started?.();   // [fork]
       }
       if (!this.playing) x = y = this.curX = this.curY = -2;
       if (this.chord) {
@@ -496,7 +527,7 @@ export class Minesweeper {
   // Touch convenience (not in the original): tap a number to chord it.
   tap(px, py) {
     if (!this.playing) return;
-    const [x, y] = Minesweeper.cellAt(px, py);
+    const [x, y] = this.cellAt(px, py);   // [fork] was Minesweeper.cellAt
     if (!this.inRange(x, y)) return;
     this.chord = (this.cell(x, y) & REVEALED) !== 0;
     this.curX = this.curY = -1;
@@ -507,7 +538,7 @@ export class Minesweeper {
 
   // XYZZY cheat (0x10020c1): is there a mine under this pixel?
   mineAt(px, py) {
-    const [x, y] = Minesweeper.cellAt(px, py);
+    const [x, y] = this.cellAt(px, py);   // [fork] was Minesweeper.cellAt
     if (!this.inRange(x, y)) return null;
     return (this.cell(x, y) & MINE) !== 0;
   }
@@ -521,7 +552,8 @@ export class Minesweeper {
   drawBlk(x, y) {   // sub_1002646
     const s = this.cell(x, y) & SPRITE;
     if (s > BLK_UP) return;
-    this.ctx.drawImage(this.set.blocks, 0, (15 - s) * 16, 16, 16, (x << 4) - 4, (y << 4) + 39, 16, 16);
+    const [dx, dy] = this.transposed ? [y, x] : [x, y];   // [fork] sideways
+    this.ctx.drawImage(this.set.blocks, 0, (15 - s) * 16, 16, 16, (dx << 4) - 4, (dy << 4) + 39, 16, 16);
   }
 
   drawGrid() {   // sub_10026a7
