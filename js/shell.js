@@ -1,5 +1,9 @@
 // Window chrome, menus, dialogs and input for the WINMINE.EXE port.
-import { Minesweeper, LEVELS, CUSTOM, SOUND_TICK, SOUND_WIN, SOUND_LOSE } from './winmine.js';
+// [fork] Here the game fills a page with a top bar (index.html) instead of a window on an XP desktop: it's drawn as
+// large as fits, in whole pixels, sideways when that makes it bigger, and each finished game can go to a score
+// service. CHANGES.md lists what changed.
+import { Minesweeper, LEVELS, CUSTOM, SOUND_TICK, SOUND_WIN, SOUND_LOSE, clientWidth, clientHeight } from './winmine.js';
+import { ScoresApi, Outbox, newId } from './scores.js';
 
 // String table (RT_STRING block 1).
 const STR = {
@@ -87,40 +91,103 @@ function playSound(id) {
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const win = $('#window');
-const canvas = $('#board');
-const desktopIcon = $('#desktop-icon');
-const taskButton = $('#task-button');
+const canvas = $('#board');   // [fork] what's shown; the engine draws on `client`
+const stage = $('#stage');
 const cheatPixel = $('#cheat-pixel');
+const cfg = document.body.dataset;
 
 const prefs = loadPrefs();
 let game;
 
-// ---- window management -----------------------------------------------------
+// ---- [fork] drawing and layout ----------------------------------------------
+// The engine draws the client area at its original size, on a canvas of its own. The page shows that on #board as
+// large as fits: in whole device pixels when that costs little (crisp, like the original at 2x or 3x), otherwise
+// "sharp bilinear", which scales up in whole pixels and smooths only the last step down, so just the edges of the
+// pixels blend. A wide field on a tall screen is shown sideways (the engine's setTransposed), when that makes the
+// squares clearly bigger.
 
-let zoom = 1;
-function fitWindow() {
-  const chromeW = 8, chromeH = 30 + 20 + 4;   // frame, title bar, menu bar
-  const availW = window.innerWidth - 16;
-  const availH = window.innerHeight - 30 - 16; // taskbar
-  const fit = Math.min(availW / (canvas.width + chromeW), availH / (canvas.height + chromeH));
-  zoom = fit >= 1 ? clamp(Math.floor(fit), 1, 2) : Math.max(fit, 0.5);
-  canvas.style.width = `${canvas.width * zoom}px`;
-  canvas.style.height = `${canvas.height * zoom}px`;
-  if (!win.dataset.moved) centerWindow();
-  else keepOnScreen();
+const client = document.createElement('canvas');
+client.width = canvas.width;
+client.height = canvas.height;
+const view = canvas.getContext('2d');
+let sharp = null;
+let fit = 1;            // CSS pixels per client-area pixel
+const MAX_FIT = 4;      // a Beginner field on a big monitor needn't fill it
+let dirty = false;
+
+{
+  const ctx = client.getContext('2d');
+  for (const m of ['drawImage', 'fillRect']) {
+    const f = ctx[m].bind(ctx);
+    ctx[m] = (...args) => { f(...args); invalidate(); };
+  }
 }
 
-function centerWindow() {
-  const r = win.getBoundingClientRect();
-  win.style.left = `${Math.max(0, Math.round((window.innerWidth - r.width) / 2))}px`;
-  win.style.top = `${Math.max(0, Math.round((window.innerHeight - 30 - r.height) / 3))}px`;
+function invalidate() {
+  if (dirty) return;
+  dirty = true;
+  requestAnimationFrame(present);
 }
 
-function keepOnScreen() {
-  const r = win.getBoundingClientRect();
-  win.style.left = `${clamp(r.left, 0, Math.max(0, window.innerWidth - r.width))}px`;
-  win.style.top = `${clamp(r.top, 0, Math.max(0, window.innerHeight - 30 - 24))}px`;
+function present() {
+  dirty = false;
+  const dpr = window.devicePixelRatio || 1;
+  let s = fit * dpr;
+  const k = Math.floor(s);
+  if (k >= 1 && (k / s >= 0.92 || dpr < 1.5)) s = k;
+  const w = Math.round(client.width * s), h = Math.round(client.height * s);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.width = `${w / dpr}px`;
+    canvas.style.height = `${h / dpr}px`;
+  }
+  if (Number.isInteger(s)) {
+    view.imageSmoothingEnabled = false;
+    view.drawImage(client, 0, 0, w, h);
+  } else {
+    const n = Math.max(1, Math.ceil(s));
+    sharp ??= document.createElement('canvas');
+    if (sharp.width !== client.width * n || sharp.height !== client.height * n) {
+      sharp.width = client.width * n;
+      sharp.height = client.height * n;
+    }
+    const sc = sharp.getContext('2d');
+    sc.imageSmoothingEnabled = false;
+    sc.drawImage(client, 0, 0, sharp.width, sharp.height);
+    view.imageSmoothingEnabled = true;
+    view.imageSmoothingQuality = 'high';
+    view.drawImage(sharp, 0, 0, w, h);
+  }
 }
+
+function layout() {
+  if (!game || !game.width) return;
+  const pad = Math.min(stage.clientWidth, stage.clientHeight) < 500 ? 4 : 12;
+  const chromeW = win.offsetWidth - canvas.offsetWidth, chromeH = win.offsetHeight - canvas.offsetHeight;
+  const availW = stage.clientWidth - 2 * pad - chromeW, availH = stage.clientHeight - 2 * pad - chromeH;
+  const fitFor = (cols, rows) => Math.min(availW / clientWidth(cols), availH / clientHeight(rows));
+  const across = fitFor(game.width, game.height), sideways = fitFor(game.height, game.width);
+  const turn = game.transposed ? !(across > sideways * 1.15) : sideways > across * 1.15;
+  if (turn !== game.transposed) {
+    game.setTransposed(turn);   // calls back here through resized()
+    return;
+  }
+  fit = Math.max(0.25, Math.min(turn ? sideways : across, MAX_FIT));
+  present();
+  snap();
+}
+
+// Centring can leave the board between device pixels, which would blur it again: nudge it onto the pixel grid.
+function snap() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.transform = '';
+  const r = canvas.getBoundingClientRect();
+  const dx = (Math.round(r.left * dpr) - r.left * dpr) / dpr, dy = (Math.round(r.top * dpr) - r.top * dpr) / dpr;
+  if (dx || dy) canvas.style.transform = `translate(${dx}px, ${dy}px)`;
+}
+
+new ResizeObserver(() => layout()).observe(stage);
 
 function makeDraggable(frame, handle, onMove) {
   handle.addEventListener('pointerdown', (e) => {
@@ -144,57 +211,25 @@ function makeDraggable(frame, handle, onMove) {
   });
 }
 
-makeDraggable(win, $('.title-bar', win), () => { win.dataset.moved = '1'; });
-
 function setActive(active) {
   win.classList.toggle('inactive', !active);
 }
 
-function minimize() {
-  closeMenus();
-  win.hidden = true;
-  game.pause();
-  taskButton.classList.remove('active');
-}
-
-function restore() {
-  win.hidden = false;
-  game.resume();
-  taskButton.classList.add('active');
-  keepOnScreen();
-}
-
 function exitGame() {
   closeMenus();
-  win.hidden = true;
-  game.pause();
-  taskButton.hidden = true;
-  desktopIcon.focus();
+  if (cfg.back) location.href = cfg.back;
+  else if (history.length > 1) history.back();
 }
-
-function launch() {
-  if (!win.hidden) return;
-  taskButton.hidden = false;
-  win.hidden = false;
-  taskButton.classList.add('active');
-  game.newGame();
-  game.resume();
-  fitWindow();
-}
-
-$('#btn-minimize').addEventListener('click', minimize);
-$('#btn-close').addEventListener('click', exitGame);
-taskButton.addEventListener('click', () => (win.hidden ? restore() : minimize()));
-desktopIcon.addEventListener('dblclick', launch);
-desktopIcon.addEventListener('keydown', (e) => { if (e.key === 'Enter') launch(); });
-desktopIcon.addEventListener('click', () => desktopIcon.focus());
-// Single tap opens on touch devices, where double-click is awkward.
-desktopIcon.addEventListener('pointerup', (e) => { if (e.pointerType === 'touch') launch(); });
 
 document.addEventListener('visibilitychange', () => {
-  if (win.hidden) return;
-  if (document.hidden) game.pause();
-  else game.resume();
+  if (!game) return;
+  if (document.hidden) {
+    game.pause();
+    pauseClock();
+  } else {
+    game.resume();
+    resumeClock();
+  }
 });
 
 // ---- menus -----------------------------------------------------------------
@@ -320,7 +355,7 @@ function openDialog({ title, body, buttons, className = '', onClose }) {
   }
 
   const r = frame.getBoundingClientRect();
-  const wr = win.hidden ? { left: 40, top: 40, width: 0, height: 0 } : win.getBoundingClientRect();
+  const wr = win.getBoundingClientRect();
   frame.style.left = `${clamp(wr.left + (wr.width - r.width) / 2, 0, Math.max(0, window.innerWidth - r.width))}px`;
   frame.style.top = `${clamp(wr.top + (wr.height - r.height) / 2, 0, Math.max(0, window.innerHeight - r.height))}px`;
   makeDraggable(frame, $('.title-bar', frame));
@@ -371,7 +406,44 @@ function customDialog() {
 }
 
 // Fastest Mine Sweepers (dialog 700, handler sub_10016fa).
+// [fork] With a score service it shows the family's fastest on each level, and your own best, instead of this
+// browser's.
 function bestTimesDialog() {
+  if (family) return familyBestDialog();
+  localBestDialog();
+}
+
+function familyBestDialog() {
+  const rows = ['Beginner:', 'Intermediate:', 'Expert:'].map((label) => {
+    const time = h('span', { className: 'time', textContent: '…' });
+    const name = h('span', { className: 'name' });
+    return [h('div', { className: 'best-row' }, h('span', { className: 'level' }, label), time, name), time, name];
+  });
+  const note = h('p', { className: 'note', textContent: `The ${family.label.toLowerCase()}'s fastest.` });
+  const body = h('div', { className: 'best-times' }, h('fieldset', {}, ...rows.map(([row]) => row)), note);
+  const buttons = [['OK', (close) => close(true), true]];
+  if (cfg.leaderboard) buttons.unshift(['Leaderboard', () => { location.href = cfg.leaderboard; }]);
+  openDialog({ title: 'Fastest Mine Sweepers', body, className: 'best-dialog', buttons });
+  Promise.all([0, 1, 2].map((lvl) => family.board(lvl, 1))).then((boards) => {
+    const mine = [];
+    boards.forEach((b, i) => {
+      const [, time, name] = rows[i];
+      const top = b.entries?.[0];
+      time.textContent = top ? STR.seconds.replace('%d', top.seconds) : '—';
+      name.textContent = top ? top.name : 'Nobody yet';
+      if (b.my_best != null) mine.push(`${LEVEL_NAMES[i]} ${b.my_best}`);
+    });
+    if (mine.length) note.textContent += ` Yours: ${mine.join(', ')}.`;
+  }, () => {
+    note.textContent = 'The family board can\'t be reached right now.';
+    rows.forEach(([, time, name], i) => {
+      time.textContent = STR.seconds.replace('%d', prefs.times[i]);
+      name.textContent = prefs.names[i];
+    });
+  });
+}
+
+function localBestDialog() {
   const rows = ['Beginner:', 'Intermediate:', 'Expert:'].map((label, i) => {
     const time = h('span', { className: 'time' });
     const name = h('span', { className: 'name' });
@@ -488,8 +560,8 @@ function helpDialog(topic) {
 
 function boardPoint(e) {
   const r = canvas.getBoundingClientRect();
-  return [Math.floor((e.clientX - r.left) * canvas.width / r.width),
-          Math.floor((e.clientY - r.top) * canvas.height / r.height)];
+  return [Math.floor((e.clientX - r.left) * client.width / r.width),   // [fork] the engine's client area
+          Math.floor((e.clientY - r.top) * client.height / r.height)];
 }
 
 const modalOpen = () => dialogLayer.children.length > 0;
@@ -544,7 +616,7 @@ canvas.addEventListener('pointerdown', (e) => {
   touch = { id: e.pointerId, px, py, timer: setTimeout(() => {
     if (!touch) return;
     touch.flagged = true;
-    const [x, y] = Minesweeper.cellAt(touch.px, touch.py);
+    const [x, y] = game.cellAt(touch.px, touch.py);   // [fork] sideways too
     if (game.playing) {
       game.cycleMark(x, y);
       navigator.vibrate?.(15);
@@ -586,6 +658,7 @@ function updateCheat(px, py, ctrl) {
   }
   const mine = game.mineAt(px, py);
   if (mine === null) return;   // the original leaves the pixel as it was
+  if (game.playing) cheated = true;   // [fork] such a game doesn't go on the boards
   cheatPixel.hidden = false;
   cheatPixel.style.background = mine ? '#000' : '#fff';
 }
@@ -594,7 +667,7 @@ document.addEventListener('keydown', (e) => {
   if (modalOpen()) return;
   if (e.key === 'F2') {
     e.preventDefault();
-    if (!win.hidden) game.newGame();
+    game.newGame();
   } else if (e.key === 'F1') {
     e.preventDefault();
     helpDialog('mine_object');
@@ -607,25 +680,198 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// ---- [fork] the top bar, How to play ------------------------------------------
+
+function link(id, href, label) {
+  const a = $(`#${id}`);
+  if (!href) return;
+  a.href = href;
+  if (label) a.textContent = label;
+  a.hidden = false;
+}
+link('back', cfg.back, cfg.backLabel && `‹ ${cfg.backLabel}`);
+link('leaderboard', cfg.leaderboard);
+link('home', cfg.home, cfg.homeLabel);
+
+const statusEl = $('#status');
+let statusTimer = 0;
+function status(text, kind, ms) {
+  statusEl.textContent = text || '';
+  statusEl.className = `status${kind ? ` ${kind}` : ''}`;
+  clearTimeout(statusTimer);
+  if (ms) statusTimer = setTimeout(() => status(idleStatus()), ms);
+}
+
+$('#fullscreen').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else stage.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => {});
+});
+if (!document.fullscreenEnabled) $('#fullscreen').disabled = true;
+
+const help = $('#help');
+function toggleHelp(show) {
+  help.hidden = show === undefined ? !help.hidden : !show;
+}
+$('#howto').addEventListener('click', () => toggleHelp());
+help.addEventListener('click', (e) => { if (e.target === help || e.target.closest('.close')) toggleHelp(false); });
+try {
+  if (!localStorage.getItem('winmine.helped')) {
+    toggleHelp(true);
+    localStorage.setItem('winmine.helped', '1');
+  }
+} catch { /* storage blocked */ }
+// Clicking the top bar mustn't leave a button holding Space or Enter
+for (const b of document.querySelectorAll('.bar button')) b.addEventListener('mouseup', () => b.blur());
+
+// ---- [fork] scores ------------------------------------------------------------
+// Each finished game (won or lost, from the first click) goes to the score service as it ends, under the signed-in
+// name. One that can't be sent waits in this browser and goes later.
+
+const LEVEL_NAMES = ['Beginner', 'Intermediate', 'Expert', 'Custom'];
+const family = cfg.scoresApi ? ScoresApi(cfg.scoresApi, { label: cfg.scoresLabel || 'Family' }) : null;
+const outbox = Outbox();
+let player = '';
+let cheated = false;
+
+// Time actually played, without a hidden tab's: for ties at the same second
+let playMs = 0, clockFrom = 0;
+function pauseClock() { if (clockFrom) { playMs += performance.now() - clockFrom; clockFrom = 0; } }
+function resumeClock() { if (inGame && !document.hidden) clockFrom = performance.now(); }
+let inGame = false;
+
+function idleStatus() {
+  const pending = outbox.list().length;
+  if (pending) return `${pending} game${pending > 1 ? 's' : ''} waiting to be sent`;
+  if (family && player) return `Playing as ${player}`;
+  return '';
+}
+
+if (family) {
+  $('.scores-note').hidden = false;
+  family.me().then((me) => { player = me.name || ''; status(idleStatus()); }, () => { /* signed out */ });
+}
+
+let sending = false;
+async function flush() {
+  if (!family || sending) return;
+  const list = outbox.list();
+  if (!list.length) return;
+  sending = true;
+  const g = list[0];
+  try {
+    const result = await family.submit(g);
+    outbox.remove(g.game_id);
+    sending = false;
+    if (!g.late) showResult(g, result);
+    else status(idleStatus());
+    flush();
+  } catch (err) {
+    sending = false;
+    if (err && err.status >= 400 && err.status < 500 && ![401, 403, 429].includes(err.status)) {
+      outbox.remove(g.game_id);   // the service won't take it (malformed): don't keep trying
+      status(`The score service turned the game down: ${err.message}`, 'warn', 8000);
+    } else {
+      status(`${idleStatus()} (no connection to the score service)`, 'warn');
+    }
+  }
+}
+window.addEventListener('online', flush);
+setInterval(flush, 60000);
+for (const g of outbox.list()) g.late = true;   // games from an earlier visit go quietly (no card)
+setTimeout(flush, 2000);
+
+function gameStarted() {
+  inGame = true;
+  playMs = 0;
+  clockFrom = 0;
+  resumeClock();
+  cheated = xyzzy === 0x11;
+  hideCard();
+}
+
+function gameOver(won) {
+  pauseClock();
+  inGame = false;
+  if (!family) return;
+  outbox.add({
+    game_id: newId(), level: prefs.difficulty, width: game.width, height: game.height, mines: prefs.mines,
+    won, seconds: game.timer, ms: Math.round(playMs), opened: game.revealed, toOpen: game.toReveal,
+    flags: game.flagsPlaced, xyzzy: cheated, date: Math.floor(Date.now() / 1000),
+  });
+  flush();
+}
+
+const card = $('#card');
+let cardTimer = 0;
+function showResult(g, r) {
+  const unlocked = (r.unlocked || []).slice().reverse();   // the hardest first
+  const level = LEVEL_NAMES[g.level];
+  const secs = (n) => `${n} second${n === 1 ? '' : 's'}`;
+  const lines = [];
+  if (g.won && g.level !== CUSTOM && !g.xyzzy) {
+    if (r.new_best && r.previous_best != null) lines.push(`<b>New personal best on ${level}: ${secs(g.seconds)}!</b>`);
+    else if (r.new_best) lines.push(`<b>Your first win on ${level}: ${secs(g.seconds)}.</b>`);
+    else lines.push(`${level} in ${secs(g.seconds)}${r.best != null ? ` (your best: ${r.best})` : ''}.`);
+    if (r.passed?.length) lines.push(`You passed ${esc(listOf(r.passed))}.`);
+    if (r.rank && r.players > 1) lines.push(`#${r.rank} of ${r.players} in the ${esc(family.label.toLowerCase())}.`);
+  } else if (g.won) {
+    lines.push(`Cleared in ${secs(g.seconds)}.`);
+  }
+  if (!lines.length && !unlocked.length) {
+    status(idleStatus());
+    return;
+  }
+  let html = lines.length ? `<div class="card-head">${lines.join(' ')}</div>` : '';
+  unlocked.slice(0, 3).forEach((a, i) => {
+    html += `<div class="unlock"${!lines.length && !i ? ' style="margin-top:0;padding-top:0;border-top:0"' : ''}>` +
+      `<span class="icon">${esc(a.icon || '🏆')}</span><span><b>${esc(a.title)}</b><br>${esc(a.text || '')}</span></div>`;
+  });
+  if (unlocked.length > 3) {
+    const more = unlocked.length - 3;
+    html += `<div class="unlock more">and ${more} more achievement${more > 1 ? 's' : ''}` +
+      `${cfg.leaderboard ? ` (<a href="${esc(cfg.leaderboard)}" target="_blank">see them all</a>)` : ''}</div>`;
+  }
+  card.innerHTML = html;
+  card.hidden = false;
+  card.classList.remove('gone');
+  clearTimeout(cardTimer);
+  cardTimer = setTimeout(hideCard, 9000 + 3000 * Math.min(unlocked.length, 3));
+  status(g.won ? `Sent to the ${family.label.toLowerCase()} board ✓` : idleStatus(), g.won ? 'ok' : '', 6000);
+}
+function hideCard() {
+  if (card.hidden) return;
+  card.classList.add('gone');
+  setTimeout(() => { card.hidden = true; }, 400);
+}
+card.addEventListener('click', hideCard);
+const esc = (v) => String(v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const listOf = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a.at(-1)}`);
+
 // ---- start -----------------------------------------------------------------
 
 (async () => {
+  status('Loading…');
   const sprites = await loadSprites();
-  game = new Minesweeper(canvas, sprites, prefs, {
+  game = new Minesweeper(client, sprites, prefs, {   // [fork] draws on `client`, shown on #board
     sound: playSound,
-    resized: () => fitWindow(),
+    resized: () => layout(),
     won: (level, time) => {
       if (level !== CUSTOM && time < prefs.times[level]) {   // sub_100347c
         prefs.times[level] = time;
-        savePrefs(prefs);
-        nameDialog(level, bestTimesDialog);
+        if (player) {
+          prefs.names[level] = player;   // [fork] the signed-in name: nobody types who they are
+          savePrefs(prefs);
+        } else {
+          savePrefs(prefs);
+          nameDialog(level, bestTimesDialog);
+        }
       }
     },
+    started: gameStarted,   // [fork]
+    over: gameOver,         // [fork]
   });
   updateMenus();
   game.newGame();
-  win.hidden = false;
-  taskButton.classList.add('active');
-  fitWindow();
-  window.addEventListener('resize', fitWindow);
+  layout();
+  status(idleStatus());
 })();
