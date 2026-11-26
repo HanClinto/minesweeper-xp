@@ -27,9 +27,10 @@ upstream's port of `WINMINE.EXE`; every change to the engine or the shell is mar
 - **Sideways on tall screens**: when the field shown sideways would have squares at least 15% bigger, it's shown
   sideways (Expert on a phone held upright: squares about 21 points instead of 12). Turning the device mid-game
   redraws the same game the other way.
-- **Controls**: Space marks the square under the mouse, as a right-click does. On a touch screen a tap is a click
-  (upstream also chorded a tap on a number) and a double tap on an open number chords it, as Shift+click does; the
-  engine's `tap(px, py, chord)` takes which.
+- **Controls**: Space or Z marks the square under the mouse, as a right-click does, and X chords it, as Shift+click
+  does (held, it presses the squares around; let go, it clears them). Z and X still count toward XYZZY. On a touch
+  screen a tap is a click (upstream also chorded a tap on a number) and a double tap on an open number chords it, as
+  Shift+click does; the engine's `tap(px, py, chord)` takes which.
 - **How to play** opens on the first visit.
 - **Scores** (with `data-scores-api` on `<body>`): every finished game, won or lost, goes to the score service as it
   ends, under the signed-in name; one that can't be sent waits in the browser (`localStorage`) and goes later, and its
