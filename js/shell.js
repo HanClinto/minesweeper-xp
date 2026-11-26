@@ -531,7 +531,7 @@ const HELP = {
   browser: ['Playing in the browser', `
     <h1>Playing in the browser</h1>
     <ul><li><b>Chord</b> (open the squares around a number): press both mouse buttons, the middle button, or Shift+click.</li>
-    <li><b>Space</b> or <b>Z</b> marks the square under the mouse, as a right-click does; <b>X</b> chords it, as Shift+click does.</li>
+    <li>Keys for the square under the mouse: <b>Space</b> uncovers it, as a click does; <b>Z</b> marks it, as a right-click does; <b>X</b> chords it, as Shift+click does.</li>
     <li><b>Touch screens</b>: tap to uncover, press and hold to mark, double-tap a number to chord it.</li>
     <li><b>F2</b> starts a new game. Best times and settings are stored in this browser.</li></ul>`],
 };
@@ -681,10 +681,10 @@ function updateCheat(px, py, ctrl) {
   cheatPixel.style.background = mine ? '#000' : '#fff';
 }
 
-// [fork] Keys for the square under the mouse: Space or Z is a right-click there, X a Shift+click (held, it presses
-// the squares around as the button would; let go, it clears around the number). Z and X are also in XYZZY: they still
-// count toward it, and act only when the mouse is over the field.
-let keyChord = false;
+// [fork] Keys for the square under the mouse: Space is a click there, Z a right-click, X a Shift+click. Space and X
+// are held like the button: down presses the square (X: the squares around it), up uncovers (X: clears around the
+// number). Z and X are also in XYZZY: they still count toward it, and act only when the mouse is over the field.
+let keyHeld = null;   // ' ' or 'x' while one is pressing the field
 function boardKey(e) {
   if (e.ctrlKey || e.metaKey || e.altKey || e.target.closest?.('button, a, input, select, textarea')) return false;
   const k = e.key.toLowerCase();
@@ -693,19 +693,23 @@ function boardKey(e) {
   if (e.repeat || !mouseAt || mouseCaptured) return k === ' ';
   e.preventDefault();
   closeMenus();
-  if (k === 'x') {
-    if (game.leftDown(...mouseAt, true)) mouseCaptured = keyChord = true;
+  if (k === ' ' || k === 'x') {
+    if (game.leftDown(...mouseAt, k === 'x' || e.shiftKey)) {
+      mouseCaptured = true;
+      keyHeld = k;
+    }
   } else {
     game.rightDown(...mouseAt, false);
   }
   return k === ' ';
 }
 document.addEventListener('keyup', (e) => {
-  if (!keyChord || e.key.toLowerCase() !== 'x') return;
-  keyChord = mouseCaptured = false;
+  if (!keyHeld || e.key.toLowerCase() !== keyHeld) return;
+  keyHeld = null;
+  mouseCaptured = false;
   game.up(...(mouseAt || [-1, -1]));
 });
-window.addEventListener('mouseup', () => { keyChord = false; });   // a mouse button let go ends it too
+window.addEventListener('mouseup', () => { keyHeld = null; });   // a mouse button let go ends it too
 
 document.addEventListener('keydown', (e) => {
   if (modalOpen()) return;

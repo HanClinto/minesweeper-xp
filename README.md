@@ -17,8 +17,8 @@ behaviour to its address in the binary.
 
 | Action | Mouse | Touch |
 | --- | --- | --- |
-| Uncover | Left click | Tap |
-| Flag / ? / clear | Right click, or Space or Z over the square | Press and hold |
+| Uncover | Left click, or Space over the square | Tap |
+| Flag / ? / clear | Right click, or Z over the square | Press and hold |
 | Chord | Both buttons, middle button, Shift+click, or X over the square | Double-tap a number |
 | New game | Smiley or F2 | Tap the smiley |
 
