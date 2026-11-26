@@ -2,7 +2,7 @@
 // [fork] Here the game fills a page with a top bar (index.html) instead of a window on an XP desktop: it's drawn as
 // large as fits, in whole pixels, sideways when that makes it bigger, and each finished game can go to a score
 // service. CHANGES.md lists what changed.
-import { Minesweeper, LEVELS, CUSTOM, SOUND_TICK, SOUND_WIN, SOUND_LOSE, clientWidth, clientHeight } from './winmine.js';
+import { Minesweeper, REVEALED, LEVELS, CUSTOM, SOUND_TICK, SOUND_WIN, SOUND_LOSE, clientWidth, clientHeight } from './winmine.js';
 import { ScoresApi, Outbox, newId } from './scores.js';
 
 // String table (RT_STRING block 1).
@@ -531,7 +531,8 @@ const HELP = {
   browser: ['Playing in the browser', `
     <h1>Playing in the browser</h1>
     <ul><li><b>Chord</b> (open the squares around a number): press both mouse buttons, the middle button, or Shift+click.</li>
-    <li><b>Touch screens</b>: tap to uncover, press and hold to mark, tap a number to chord it.</li>
+    <li><b>Space</b> marks the square under the mouse, as a right-click does.</li>
+    <li><b>Touch screens</b>: tap to uncover, press and hold to mark, double-tap a number to chord it.</li>
     <li><b>F2</b> starts a new game. Best times and settings are stored in this browser.</li></ul>`],
 };
 
@@ -590,6 +591,11 @@ window.addEventListener('mousemove', (e) => {
   updateCheat(px, py, e.ctrlKey);
 });
 
+// [fork] Where the mouse is over the field, for Space (a right-click there).
+let mouseAt = null;
+canvas.addEventListener('mousemove', (e) => { mouseAt = boardPoint(e); });
+canvas.addEventListener('mouseleave', () => { mouseAt = null; });
+
 window.addEventListener('mouseup', (e) => {
   if (!mouseCaptured) return;
   mouseCaptured = false;
@@ -600,9 +606,11 @@ window.addEventListener('mouseup', (e) => {
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('auxclick', (e) => e.preventDefault());
 
-// Touch: tap to uncover, long-press to mark.
+// Touch: tap to uncover, long-press to mark, [fork] double tap to chord (Shift+click).
 const LONG_PRESS_MS = 400;
+const DOUBLE_TAP_MS = 300;   // [fork] from the first tap's lift to the second's touch
 let touch = null;
+let lastTap = null;   // [fork] { x, y, at, open }: the square of the last tap, and whether it was already open
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse' || modalOpen()) return;
   e.preventDefault();   // suppress the compatibility mouse events
@@ -613,7 +621,7 @@ canvas.addEventListener('pointerdown', (e) => {
     touch = { id: e.pointerId, face: true };
     return;
   }
-  touch = { id: e.pointerId, px, py, timer: setTimeout(() => {
+  touch = { id: e.pointerId, px, py, down: e.timeStamp, timer: setTimeout(() => {
     if (!touch) return;
     touch.flagged = true;
     const [x, y] = game.cellAt(touch.px, touch.py);   // [fork] sideways too
@@ -641,7 +649,17 @@ const endTouch = (e) => {
     return;
   }
   clearTimeout(t.timer);
-  if (!t.flagged && e.type === 'pointerup') game.tap(t.px, t.py);
+  if (t.flagged || e.type !== 'pointerup') {
+    lastTap = null;
+    return;
+  }
+  // [fork] A second tap on the same open square chords it. A square the first tap uncovered isn't chorded, as
+  // Shift+click on a covered square does nothing.
+  const [x, y] = game.cellAt(t.px, t.py);
+  const open = game.inRange(x, y) && (game.cell(x, y) & REVEALED) !== 0;
+  const second = lastTap && lastTap.x === x && lastTap.y === y && lastTap.open && t.down - lastTap.at < DOUBLE_TAP_MS;
+  game.tap(t.px, t.py, !!second);
+  lastTap = second ? null : { x, y, at: e.timeStamp, open };
 };
 canvas.addEventListener('pointerup', endTouch);
 canvas.addEventListener('pointercancel', endTouch);
@@ -673,6 +691,10 @@ document.addEventListener('keydown', (e) => {
     helpDialog('mine_object');
   } else if (e.key === 'Escape') {
     closeMenus();
+  } else if (e.key === ' ' && !e.target.closest?.('button, a, input, select, textarea')) {
+    // [fork] Space marks the square under the mouse, as a right-click there would.
+    e.preventDefault();
+    if (!e.repeat && mouseAt && !mouseCaptured) game.rightDown(...mouseAt, false);
   } else if (e.key === 'Shift') {
     if (xyzzy >= 5) xyzzy ^= 0x14;
   } else if (xyzzy < 5 && e.key.length === 1) {

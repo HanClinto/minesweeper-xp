@@ -524,12 +524,13 @@ export class Minesweeper {
     this.drawFace(this.face);
   }
 
-  // Touch convenience (not in the original): tap a number to chord it.
-  tap(px, py) {
+  // Touch convenience (not in the original): a click, or with chord a Shift+click.
+  // [fork] upstream chorded any tap on a number; the page now chords on a double tap.
+  tap(px, py, chord = false) {
     if (!this.playing) return;
     const [x, y] = this.cellAt(px, py);   // [fork] was Minesweeper.cellAt
     if (!this.inRange(x, y)) return;
-    this.chord = (this.cell(x, y) & REVEALED) !== 0;
+    this.chord = chord;
     this.curX = this.curY = -1;
     this.trackTo(x, y);
     this.tracking = false;

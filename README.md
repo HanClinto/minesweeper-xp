@@ -18,8 +18,8 @@ behaviour to its address in the binary.
 | Action | Mouse | Touch |
 | --- | --- | --- |
 | Uncover | Left click | Tap |
-| Flag / ? / clear | Right click | Press and hold |
-| Chord | Both buttons, middle button or Shift+click | Tap a number |
+| Flag / ? / clear | Right click, or Space over the square | Press and hold |
+| Chord | Both buttons, middle button or Shift+click | Double-tap a number |
 | New game | Smiley or F2 | Tap the smiley |
 
 ## Using it on a site (this fork)

@@ -103,7 +103,9 @@ test('sideways: flags and chords land on the square under the finger', () => {
   g.rightDown(...at(g, 1, 1), false);
   assert.equal(g.minesLeft, 0);
   assert.equal(g.flagsPlaced, 1);
-  g.tap(...at(g, 2, 2));   // its mine is flagged: opens what's around it
+  g.tap(...at(g, 2, 2));   // a plain tap on a number, like a click: nothing
+  assert.ok(!(g.cell(2, 1) & REVEALED));
+  g.tap(...at(g, 2, 2), true);   // a chord (the page's double tap): its mine is flagged, so it opens what's around it
   assert.ok(g.cell(2, 1) & REVEALED);
 });
 
